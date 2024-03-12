@@ -1,4 +1,241 @@
 ```{r}
 this is the beginning
+install.packages("lidR")
+install.packages("RCSF")
+install.packages("future")
+library(lidR)
+library(terra)
+library(units)
+library(mapview)
+library(tidyverse)
+
+##function to plot a cross section of LiDAR data
+
+plot_crossection <- function(las,
+                             p1 = c(min(las@data$X), mean(las@data$Y)),
+                             p2 = c(max(las@data$X), mean(las@data$Y)),
+                             width = 4, colour_by = NULL)
+{
+  require(ggplot2)
+  colour_by <- rlang::enquo(colour_by)
+  data_clip <- clip_transect(las, p1, p2, width)
+  p <- ggplot(data_clip@data, aes(X,Z)) + 
+    geom_point(size = 0.5) + 
+    coord_equal() + 
+    theme_minimal()
+  
+  if (!is.null(colour_by))
+    p <- p + 
+    aes(color = !!colour_by) + labs(color = "")
+  
+  return(p)
+}
+
+##bring my data set in
+
+lasfile<- "Matt Francis.las"
+las <- readLAS(lasfile)
 ```
 
+```{r}
+##Part 1. 1. A.
+##Count number of points and verify
+
+number_points <- length(las@data$X)
+las
+
+##B. max elevation within point cloud and view
+
+lasmaxelevation <- max(las@data$Z)
+lasmaxelevation
+```
+
+```{r}
+##Part 1. 2. A. Classify ground points using the cloth simulated function 
+##(CSF) algorithm and produce a DEM using the triangular irregular network (TIN)
+##algorithm.
+
+las_ground_points <- classify_ground(las, algorithm = csf())
+plot_crossection(las_ground_points, colour_by = factor(Classification))
+ground_csf <- csf(sloop_smooth = TRUE, class_threshold = 1, cloth_resolution = 1,
+             time_step = 1)
+las_ground_points <- classify_ground(las, algorithm = ground_csf)
+plot_crossection(las_ground_points, colour_by = factor(Classification))
+DEM <- rasterize_terrain(las_ground_points, res = 1, algorithm = tin())
+plot(DEM)
+```
+
+```{r}
+##Part 1. 2. B.	Classify ground points using a progressive morphological 
+##filter (PMF) algorithm and produce a DEM using the TIN algorithm.
+
+las_ground_points_pmf <- classify_ground(las, algorithm = pmf(ws = 5, th = 3))
+dem_pmf <- rasterize_terrain(las_ground_points_pmf, res = 1, algorithm = tin())
+plot(dem_pmf)
+```
+
+```{r}
+##Part 1. 2. C.	Classify ground points using the CSF algorithm and produce a
+##DEM using the inverse distance weighting algorithm.
+
+las_ground_points <- classify_ground(las, algorithm = csf())
+dem_inverse <- rasterize_terrain(las_ground_points, algorithm = knnidw(k = 10L, p = 2))
+plot(dem_inverse)
+```
+
+```{r}
+##Part 1. 2. D. Briefly describe how the PMF algorithm works. 
+
+##An algorithm that is designed to classify ground points in ground and
+##none ground returns of the lidar points. this is important for complex terrain
+##needs to be done for correct formulation of the DEM
+##it does this by filtering the differetn elvations for non ground points and
+##reclasifying them.
+```
+
+```{r}
+##Part 1. 3. A. Normalize the point cloud using the inverse distance weighting
+##algorithm, and then produce a CHM using the point-to-raster algorithm.
+
+las_normal <- normalize_height(las_ground_points, knnidw())
+View(las_normal@data)
+
+chm_point_2_raster <- rasterize_canopy(las_normal, res = 1, algorithm = p2r())
+plot(chm_point_2_raster)
+```
+
+```{r}
+##Part 1. 3. B.	Normalize the point cloud using the TIN algorithm and then
+##produce a CHM using the TIN algorithm as well (i.e.: the “dsmtin” algorithm).
+
+las_normal_tin <- normalize_height(las_ground_points, tin())
+Normal_chm_tin <- rasterize_canopy(las_normal_tin, res = 1,
+                                   dsmtin(max_edge = 5))
+plot(Normal_chm_tin)
+```
+
+```{r}
+##Part 1. 3. C. Normalize the point cloud using the TIN algorithm, and then
+##produce a CHM using the point-to-raster algorithm.
+
+chm_point_2_raster_tin <- rasterize_canopy(las_normal_tin, res = 1, 
+                                           algorithm = p2r())
+plot(chm_point_2_raster_tin)
+```
+
+```{r}
+##Part 1. 3. D.	Briefly describe how the inverse distance weighting
+##algorithm works.
+
+##an estimation of values for unknown points based on the values of known
+##points. as the points become further apart the contribution to the estimated
+##value is also decreased. closer points have more impact on the estimation
+##of its surrounding unknown points
+```
+
+```{r}
+##Part 1. 4. Choose one of the three normalization/CHM combinations from
+##question three to move forward with.
+
+##A.Perform individual tree segmentation (ITS) of the normalized point cloud
+##using the Dalponte 2016 algorithm.
+
+?dalponte2016
+
+ttops <- locate_trees(chm_point_2_raster_tin, lmf(5))
+mapview(ttops)
+DAL_ITS_LAS <- segment_trees(las_normal, dalponte2016(chm_point_2_raster_tin,
+                                                      ttops))
+plot(DAL_ITS_LAS, color = "treeID")
+
+##B.Perform ITS of the normalized point cloud using the Li et al. 2012
+##algorithm.
+
+?li2012
+
+LI_ITS_LAS <- segment_trees(las_normal, li2012())
+plot(LI_ITS_LAS, color = "treeID")
+
+
+##C.Perform ITS of the normalized point cloud using the Silva 2016 algorithm
+?silva2016
+
+SILVA_ITS_LAS <- segment_trees(las_normal, silva2016(chm_point_2_raster_tin, 
+                                                     ttops, max_cr_factor = 0.6, 
+                                                     exclusion = 0.3, ID =
+                                                       "treeID"))
+plot(SILVA_ITS_LAS, color = "treeID")
+
+
+##D.Briefly describe how the Silva 2016 algorithm works.
+
+##The Silva 2016 algorithm refers to a method introduced by Carlos Alberto Silva
+##et al. its designed to classify ground points from LiDAR data. It's 
+##specifically aimed at improving the identification of ground points in 
+##forested areas, where distinguishing between vegetation and the ground can be 
+##particularly challenging due to the dense canopy cover.
+```
+
+```{r}
+##Part 1. 5. Retrieve the crown metrics for each of the tree segmented point 
+##clouds produced in number 4. How many trees were identified in each algorithm?
+##What is the overall tree density in each of the segmented point clouds?
+install_unit("stems")
+
+dalponte <- crown_metrics(DAL_ITS_LAS, .stdtreemetrics)
+n_trees_dalponte<- set_units(nrow(dalponte), "stems")
+print(n_trees_dalponte)
+st_area(DAL_ITS_LAS)
+pc_area <- set_units(st_area(DAL_ITS_LAS), "ha")
+n_trees_dalponte / pc_area
+round(n_trees_dalponte / pc_area)
+
+li <- crown_metrics(LI_ITS_LAS, .stdtreemetrics)
+n_trees_li <- set_units(nrow(li), "stems")
+print(n_trees_li)
+st_area(DAL_ITS_LAS)
+pc_area <- set_units(st_area(LI_ITS_LAS), "ha")
+n_trees_li / pc_area
+round(n_trees_li / pc_area)
+
+silva <- crown_metrics(SILVA_ITS_LAS, .stdtreemetrics)
+n_trees_silva <- set_units(nrow(silva), "stems")
+print(n_trees_silva)
+st_area(SILVA_ITS_LAS)
+pc_area <- set_units(st_area(SILVA_ITS_LAS), "ha")
+n_trees_silva / pc_area
+round(n_trees_silva / pc_area)
+```
+
+```{r}
+##Part 2. 1. Isolate the tallest tree in one of the segmented point clouds. How many points are there that make up this particular tree?
+
+
+tallest_tree_metrics <- crown_metrics(DAL_ITS_LAS, .stdtreemetrics)
+tall_trees <- tallest_tree_metrics %>% 
+  filter(Z == max(Z))
+tallest_tree_points <- filter_poi(DAL_ITS_LAS, treeID == tall_trees$treeID[1])
+tree_points <- npoints(tallest_tree_points)
+print(tree_points)
+
+##Part 2. 2. What is the crown area of the tallest tree? What about the crown
+##area of the shortest tree?
+
+##tallest tree crown area
+
+tall_tree_crown_area <- dalponte %>% 
+  filter(Z == max(Z)) %>% 
+  select(convhull_area)
+print(tall_tree_crown_area$convhull_area)
+
+##shortest tree crown area
+
+short_tree_crown_area <- dalponte %>% 
+  filter(Z == min(Z)) %>% 
+  select(convhull_area)
+print(short_tree_crown_area$convhull_area)
+
+#Part 2. 3.Plot this point cloud coloring the points by their treeID.
+
+plot(DAL_ITS_LAS, color = "treeID")
+```
